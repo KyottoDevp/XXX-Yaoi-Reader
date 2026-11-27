@@ -6,6 +6,7 @@ on:
     branches: [ "main", "master" ]
     paths:
       - "app/**"
+      - "gradle/**"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle.properties"
@@ -13,19 +14,29 @@ on:
   pull_request:
     paths:
       - "app/**"
+      - "gradle/**"
       - "build.gradle.kts"
       - "settings.gradle.kts"
       - "gradle.properties"
       - ".github/workflows/android-apk.yml"
 
+# Cancela execuções antigas do mesmo branch quando um novo push chega
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dfile.encoding=UTF-8"
 
 jobs:
   build:
     name: Compile debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 35
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -39,24 +50,67 @@ jobs:
       - name: Configure Android SDK
         uses: android-actions/setup-android@v3
 
+      # A partir da API 37 o pacote tem versão menor no nome: android-37.0
+      # ("platforms;android-37" NÃO existe e derruba o job com exit code 1).
       - name: Install Android API 37 and build tools
-        run: sdkmanager "platforms;android-37" "build-tools;36.0.0"
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
+          echo "Plataformas instaladas:"
+          ls "$ANDROID_HOME/platforms"
 
       - name: Configure Gradle 9.5
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.5.0"
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 
       - name: Run unit tests
-        run: gradle --no-daemon :app:testDebugUnitTest
+        shell: bash
+        run: |
+          mkdir -p build-logs
+          gradle --no-daemon --console=plain --stacktrace :app:testDebugUnitTest \
+            2>&1 | tee build-logs/unit-tests.log
 
-      - name: Build APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Build debug APK
+        shell: bash
+        run: |
+          mkdir -p build-logs
+          gradle --no-daemon --console=plain --stacktrace :app:assembleDebug \
+            2>&1 | tee build-logs/assemble.log
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          ls -lh "$APK"
+          {
+            echo "### APK gerado com sucesso"
+            echo ""
+            echo "- Arquivo: \`app-debug.apk\`"
+            echo "- Tamanho: $(du -h "$APK" | cut -f1)"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: xxxyaoi-reader-debug-apk
+          name: xxxyaoi-reader-debug-apk-${{ github.run_number }}
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      # Se algo falhar, o log completo e os relatórios ficam para download
+      - name: Upload build logs and reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            build-logs/
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+          
